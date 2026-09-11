@@ -142,6 +142,26 @@ public sealed class WebSocketClientConnectionTests
             _ = new WebSocketClient(new WebSocketClientOptions { Uri = new Uri("https://example.invalid/") }));
     }
 
+    /// <summary>
+    /// 建構式塞不進 <c>Result</c>,失敗只能走例外;但錯誤的代碼與分類不該因此消失在訊息字串裡。
+    /// 型別維持 <see cref="ArgumentException"/>(既有的 catch 不受影響),完整的 <c>Error</c> 由
+    /// <c>ResultException</c> 帶在 <c>InnerException</c> 上。
+    /// A constructor cannot return a <c>Result</c>, so the failure travels as an exception — but the code and
+    /// category must not vanish into the message. The type stays <see cref="ArgumentException"/>, leaving existing
+    /// catch blocks alone, while the full <c>Error</c> rides along in <c>InnerException</c> as a
+    /// <c>ResultException</c>.
+    /// </summary>
+    [TestMethod]
+    public void 建構_設定不合法_內層例外帶著完整的Error()
+    {
+        var thrown = Assert.ThrowsExactly<ArgumentException>(() => _ = new WebSocketClient(new WebSocketClientOptions()));
+
+        var inner = thrown.InnerException as ResultException;
+        Assert.IsNotNull(inner, "內層例外必須是 ResultException,呼叫端才拿得回 Error");
+        Assert.AreEqual(WebSocketErrorCodes.OptionsInvalid, inner.Error.Code);
+        Assert.AreEqual(ErrorCategory.Validation, inner.Error.Category);
+    }
+
     [TestMethod]
     public async Task 建構_不指定連線工廠_可建立但不會主動連線()
     {

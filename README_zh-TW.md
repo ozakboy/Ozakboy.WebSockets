@@ -97,11 +97,21 @@ await foreach (var item in client.Messages(cancellationToken))
         continue;
     }
 
-    // 失敗代表這裡斷過線,資料可能有缺口。串流會繼續,
-    // 除非代碼是 ws.reconnect_exhausted —— 那一定是最後一個元素。
-    logger.LogWarning("串流有缺口:{Error}", item.Error);
+    // 失敗代表這裡斷過線,資料可能有缺口。看 IsTransient 就知道是哪一種:
+    // true 是缺口,串流會繼續;false 是終局失敗(ws.reconnect_exhausted),這是最後一個元素。
+    if (item.Error.IsTransient)
+    {
+        logger.LogWarning("串流有缺口:{Error}", item.Error);
+        continue;
+    }
+
+    item.Error.TryGetInt64("attempts", out var attempts);
+    logger.LogError("客戶端已在重連 {Attempts} 次後停止:{Error}", attempts, item.Error);
 }
 ```
+
+這裡沒有任何一行需要比對錯誤代碼。「值不值得重試」的單一真相來源就是 `IsTransient`,本套件產生的每一個錯誤都
+挑好分類,確保它回答得正確。
 
 連線前登記的訂閱會隨第一次連線送出;斷線期間登記的訂閱會被保留,下次連上時送出。每一次連線都會重放完整的清單。
 
@@ -157,14 +167,36 @@ var stats = client.Statistics;
 | `ws.connect_timeout` | Timeout | 握手沒能在時限內完成 |
 | `ws.connection_lost` | Network | 連線中斷,資料有缺口 |
 | `ws.idle_timeout` | Timeout | 閒置時間內什麼都沒收到 |
-| `ws.reconnect_exhausted` | Unavailable | 放棄重連,客戶端已停止 —— **串流的最後一個元素** |
-| `ws.not_connected` | Unavailable | 目前沒有連線可送 |
+| `ws.reconnect_exhausted` | **Exhausted**(非暫時性) | 放棄重連,客戶端已停止 —— **串流的最後一個元素** |
+| `ws.not_connected` | Unavailable;客戶端已關閉時為 **Exhausted** | 目前沒有連線可送 |
 | `ws.send_failed` | Network | 送出失敗 |
 | `ws.subscription_replay_failed` | Network | 重放失敗,這條連線已作廢重來 |
 | `ws.subscription_not_found` | NotFound | 沒有這個識別碼的訂閱 |
 | `ws.message_too_large` | Network | 單則訊息超過 `MaxMessageSize` |
 | `ws.invalid_state` | Conflict | 目前的生命週期狀態不允許 |
 | `ws.cancelled` | Cancelled | 呼叫端取消 |
+
+分類的挑法是讓 `IsTransient` 說實話,所以你其實不必翻這張表來決定要不要重試。最值得說清楚的是
+`ws.reconnect_exhausted`:對方確實是不可用沒錯,但這個客戶端物件已經結束了,再怎麼重試都不會連上,重試等於
+要換一個新的客戶端 —— 所以它是 `Exhausted` 而不是暫時性的 `Unavailable`。`ws.not_connected` 同一套規則:
+連線中或重連中是暫時性的,客戶端關閉之後就是 `Exhausted`。
+
+錯誤訊息裡的數值同時放在 `Error.Data`,不必去剖析字串:
+
+| 代碼 | 資料鍵 |
+| --- | --- |
+| `ws.reconnect_exhausted` | `attempts` |
+| `ws.connect_timeout`、`ws.idle_timeout` | `timeoutMs` |
+| `ws.message_too_large` | `limitBytes` |
+| `ws.subscription_not_found` | `subscriptionId` |
+| `ws.subscription_replay_failed` | `subscriptionId`、`innerCode` |
+| `ws.not_connected` | `state` |
+| `ws.invalid_state` | `state`、`operation` |
+| `ws.cancelled` | `operation` |
+
+```csharp
+error.TryGetInt64("attempts", out var attempts);
+```
 
 ---
 
@@ -176,7 +208,7 @@ var stats = client.Statistics;
 var client = new WebSocketClient(options, myFakeFactory, logger, myFakeClock);
 ```
 
-這個套件自己的測試就是這樣寫的 —— 98 條,沒有任何一條開過 socket。
+這個套件自己的測試就是這樣寫的 —— 100 條,沒有任何一條開過 socket。
 
 ---
 

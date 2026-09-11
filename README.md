@@ -98,10 +98,21 @@ await foreach (var item in client.Messages(cancellationToken))
     }
 
     // A failure means the connection dropped here and data may be missing.
-    // The stream carries on unless the code is ws.reconnect_exhausted, which is always the last element.
-    logger.LogWarning("Gap in the stream: {Error}", item.Error);
+    // IsTransient says which kind it is: true is a gap and the stream carries on,
+    // false is terminal (ws.reconnect_exhausted) and this is the last element.
+    if (item.Error.IsTransient)
+    {
+        logger.LogWarning("Gap in the stream: {Error}", item.Error);
+        continue;
+    }
+
+    item.Error.TryGetInt64("attempts", out var attempts);
+    logger.LogError("The client has stopped after {Attempts} attempts: {Error}", attempts, item.Error);
 }
 ```
+
+Nothing here asks you to branch on an error code. `IsTransient` is the single source of truth for "is this worth
+retrying", and every error this package produces is categorised so that it answers correctly.
 
 Subscriptions registered before connecting go out with the first connection. Subscriptions registered while disconnected are kept and go out with the next one. Every connection replays the full list.
 
@@ -157,14 +168,37 @@ Branch on `WebSocketErrorCodes`, not on message text. Messages are for people an
 | `ws.connect_timeout` | Timeout | Handshake did not finish in time |
 | `ws.connection_lost` | Network | The connection dropped; a gap in the data |
 | `ws.idle_timeout` | Timeout | Nothing arrived within the idle window |
-| `ws.reconnect_exhausted` | Unavailable | Gave up; the client has stopped — **the last element in the stream** |
-| `ws.not_connected` | Unavailable | Nothing to send on right now |
+| `ws.reconnect_exhausted` | **Exhausted** (not transient) | Gave up; the client has stopped — **the last element in the stream** |
+| `ws.not_connected` | Unavailable, or **Exhausted** once the client is closed | Nothing to send on right now |
 | `ws.send_failed` | Network | The send failed |
 | `ws.subscription_replay_failed` | Network | A replay failed; the connection was abandoned and retried |
 | `ws.subscription_not_found` | NotFound | No subscription with that id |
 | `ws.message_too_large` | Network | One message exceeded `MaxMessageSize` |
 | `ws.invalid_state` | Conflict | The lifecycle state does not allow this |
 | `ws.cancelled` | Cancelled | The caller cancelled |
+
+The categories are chosen so that `IsTransient` tells the truth, which means you never have to read this table to
+decide whether to retry. `ws.reconnect_exhausted` is the case worth spelling out: the peer genuinely is unavailable,
+but this client instance is finished and retrying it can never work — retrying means constructing a new client — so it
+is `Exhausted`, not the transient `Unavailable`. `ws.not_connected` follows the same rule: transient while the client
+is connecting or reconnecting, `Exhausted` once it has closed for good.
+
+The numbers in an error message are also in `Error.Data`, so you never have to parse the text:
+
+| Code | Data keys |
+| --- | --- |
+| `ws.reconnect_exhausted` | `attempts` |
+| `ws.connect_timeout`, `ws.idle_timeout` | `timeoutMs` |
+| `ws.message_too_large` | `limitBytes` |
+| `ws.subscription_not_found` | `subscriptionId` |
+| `ws.subscription_replay_failed` | `subscriptionId`, `innerCode` |
+| `ws.not_connected` | `state` |
+| `ws.invalid_state` | `state`, `operation` |
+| `ws.cancelled` | `operation` |
+
+```csharp
+error.TryGetInt64("attempts", out var attempts);
+```
 
 ---
 
@@ -176,7 +210,7 @@ Branch on `WebSocketErrorCodes`, not on message text. Messages are for people an
 var client = new WebSocketClient(options, myFakeFactory, logger, myFakeClock);
 ```
 
-That is exactly how this package's own tests work — 98 of them, none of which open a socket.
+That is exactly how this package's own tests work — 100 of them, none of which open a socket.
 
 ---
 

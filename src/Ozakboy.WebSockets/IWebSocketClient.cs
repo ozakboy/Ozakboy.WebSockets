@@ -201,15 +201,23 @@ public interface IWebSocketClient : IAsyncDisposable
     /// <see cref="WebSocketErrorCodes.ReconnectExhausted"/> — and is the final element before the enumeration ends.
     /// </para>
     /// <para>
-    /// <b>要區分這兩種請比對 <see cref="Error.Code"/>,不要用 <see cref="Error.IsTransient"/>。</b>
-    /// 終局失敗的分類是 <see cref="ErrorCategory.Unavailable"/>(對方確實是不可用),而那個分類在
-    /// <c>Ozakboy.Core.Abstractions</c> 裡算暫時性,現有的分類沒有一個能表達「這個物件已經結束了,
-    /// 重試要換一個新的客戶端」。串流會自行結束,所以就算沒分清楚也不會卡住,但告警邏輯要看代碼。
-    /// <b>Tell them apart by <see cref="Error.Code"/>, not <see cref="Error.IsTransient"/>.</b> The terminal failure
-    /// is categorised <see cref="ErrorCategory.Unavailable"/> — the peer genuinely is unavailable — and that category
-    /// counts as transient in <c>Ozakboy.Core.Abstractions</c>; no existing category expresses "this instance is
-    /// finished, retrying means constructing a new client". The stream ends by itself either way, so nothing hangs,
-    /// but alerting logic must look at the code.
+    /// <b>要區分這兩種直接看 <see cref="Error.IsTransient"/> 即可。</b>可繼續的缺口通知分類是
+    /// <see cref="ErrorCategory.Network"/> 或 <see cref="ErrorCategory.Timeout"/>,<see cref="Error.IsTransient"/>
+    /// 為 <see langword="true"/>;終局失敗的分類是 <see cref="ErrorCategory.Exhausted"/>,
+    /// <see cref="Error.IsTransient"/> 為 <see langword="false"/>。告警邏輯不需要、也不應該去比對錯誤代碼
+    /// —— 一旦有人這樣做,<see cref="Error.IsTransient"/> 就不再是「值不值得重試」的單一真相來源了。
+    /// <b>Tell them apart with <see cref="Error.IsTransient"/>.</b> A gap notice is categorised
+    /// <see cref="ErrorCategory.Network"/> or <see cref="ErrorCategory.Timeout"/> and reports
+    /// <see cref="Error.IsTransient"/> as <see langword="true"/>; the terminal failure is categorised
+    /// <see cref="ErrorCategory.Exhausted"/> and reports <see langword="false"/>. Alerting logic neither needs nor
+    /// should branch on the error code — once anyone does that, <see cref="Error.IsTransient"/> has stopped being
+    /// the single source of truth for "is this worth retrying".
+    /// </para>
+    /// <para>
+    /// 想知道放棄前試了幾次,從 <see cref="Error.Data"/> 的 <c>attempts</c> 讀回來
+    /// (<see cref="Error.TryGetInt64(string, out long)"/>),不必剖析訊息字串。
+    /// The number of attempts made before giving up comes back from the <c>attempts</c> entry in
+    /// <see cref="Error.Data"/> via <see cref="Error.TryGetInt64(string, out long)"/>, with no message parsing.
     /// </para>
     /// <para>
     /// 斷線一律在串流中現身,而不是只寫進日誌,是刻意的設計:只做 <c>await foreach</c> 的呼叫端也必須

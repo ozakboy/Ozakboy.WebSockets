@@ -106,8 +106,13 @@ public sealed class WebSocketClient : IWebSocketClient
     /// <exception cref="ArgumentException">
     /// 設定未通過 <see cref="WebSocketClientOptions.Validate"/> 時擲出。設定錯誤是程式缺陷而不是執行期失敗,
     /// 所以在這裡就擲出,不留到連線時才回傳失敗。
+    /// <see cref="Exception.InnerException"/> 是一個
+    /// <see cref="Core.Abstractions.ResultException"/>,它的 <see cref="Core.Abstractions.ResultException.Error"/>
+    /// 帶著完整的錯誤代碼與分類。
     /// Thrown when the options fail <see cref="WebSocketClientOptions.Validate"/>. A bad configuration is a defect
-    /// rather than a runtime failure, so it surfaces here instead of as a failed connection later.
+    /// rather than a runtime failure, so it surfaces here instead of as a failed connection later. The
+    /// <see cref="Exception.InnerException"/> is a <see cref="Core.Abstractions.ResultException"/> whose
+    /// <see cref="Core.Abstractions.ResultException.Error"/> carries the full code and category.
     /// </exception>
     public WebSocketClient(
         WebSocketClientOptions options,
@@ -136,8 +141,12 @@ public sealed class WebSocketClient : IWebSocketClient
     /// Thrown when <paramref name="options"/> or <paramref name="connectionFactory"/> is <see langword="null"/>.
     /// </exception>
     /// <exception cref="ArgumentException">
-    /// 設定未通過 <see cref="WebSocketClientOptions.Validate"/> 時擲出。
-    /// Thrown when the options fail <see cref="WebSocketClientOptions.Validate"/>.
+    /// 設定未通過 <see cref="WebSocketClientOptions.Validate"/> 時擲出;
+    /// <see cref="Exception.InnerException"/> 是攜帶完整錯誤的
+    /// <see cref="Core.Abstractions.ResultException"/>。
+    /// Thrown when the options fail <see cref="WebSocketClientOptions.Validate"/>. The
+    /// <see cref="Exception.InnerException"/> is a <see cref="Core.Abstractions.ResultException"/> carrying the full
+    /// error.
     /// </exception>
     public WebSocketClient(
         WebSocketClientOptions options,
@@ -151,7 +160,14 @@ public sealed class WebSocketClient : IWebSocketClient
         var validation = options.Validate();
         if (validation.IsFailure)
         {
-            throw new ArgumentException(validation.Error.Message, nameof(options));
+            // 建構式的簽章塞不進 Result,這個失敗只能走例外。型別維持 ArgumentException —— 對呼叫端而言
+            // 這確實是參數錯誤,改成別的型別只會讓既有的 catch 失效;同時把完整的 Error 包成
+            // ResultException 掛在 InnerException 上,想讀代碼與分類的呼叫端就不必去剖析訊息字串。
+            // A constructor signature has no room for a Result, so this failure can only travel as an exception. The
+            // type stays ArgumentException — from the caller's side this really is a bad argument, and changing it
+            // would only break existing catch blocks — while the full Error rides along as a ResultException in
+            // InnerException, so callers that want the code and category never have to parse the message.
+            throw new ArgumentException(validation.Error.Message, nameof(options), validation.Error.ToException());
         }
 
         _options = options;

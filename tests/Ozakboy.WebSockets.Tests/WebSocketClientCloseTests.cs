@@ -170,4 +170,28 @@ public sealed class WebSocketClientCloseTests
         Assert.IsTrue(result.IsFailure);
         Assert.AreEqual(WebSocketErrorCodes.InvalidState, result.Error!.Code);
     }
+
+    /// <summary>
+    /// 關閉之後再送出,失敗必須是非暫時性的。這個客戶端不會再連上了,若分類仍是暫時性的
+    /// <c>Unavailable</c>,任何照著 <c>IsTransient</c> 做重試的呼叫端都會對著一個死掉的物件永遠重試下去。
+    /// A send after the client has closed must fail non-transiently. This instance will never connect again, and
+    /// with the transient <c>Unavailable</c> category any caller that retries on <c>IsTransient</c> would retry
+    /// against a dead object forever.
+    /// </summary>
+    [TestMethod]
+    public async Task 關閉之後送出_失敗是非暫時性的()
+    {
+        await using var harness = new ClientHarness();
+        await harness.Client.ConnectAsync();
+        await harness.Client.CloseAsync();
+
+        var result = await harness.Client.SendAsync("anything");
+
+        Assert.IsTrue(result.IsFailure);
+        Assert.AreEqual(WebSocketErrorCodes.NotConnected, result.Error!.Code);
+        Assert.AreEqual(ErrorCategory.Exhausted, result.Error.Category);
+        Assert.IsFalse(result.Error.IsTransient, "已關閉的客戶端永遠不會再連上,重試沒有意義");
+        Assert.IsTrue(result.Error.TryGetData("state", out var state));
+        Assert.AreEqual(nameof(WebSocketClientState.Closed), state);
+    }
 }

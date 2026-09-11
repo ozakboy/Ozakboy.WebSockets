@@ -200,12 +200,22 @@ public sealed class WebSocketClientReconnectTests
             () => harness.FailuresReceived.Any(error => error.Code == WebSocketErrorCodes.ReconnectExhausted),
             "串流中出現重連用盡的失敗");
 
-        // 終局與否看的是代碼與串流是否結束,不是 IsTransient —— 現有的錯誤分類沒有一個能表達
-        // 「這個客戶端已經結束了」,詳見 IWebSocketClient.Messages 的說明。
-        // Terminality is judged by the code and by the stream ending, not by IsTransient: no existing error category
-        // expresses "this client is finished". See the remarks on IWebSocketClient.Messages.
         var terminal = harness.FailuresReceived.Single(error => error.Code == WebSocketErrorCodes.ReconnectExhausted);
-        Assert.AreEqual(ErrorCategory.Unavailable, terminal.Category);
+
+        // 這條是本套件對「終局失敗」的核心承諾:呼叫端只要看 IsTransient 就知道不必再重試,
+        // 不需要、也不應該去比對錯誤代碼。分類一旦被改回 Unavailable(暫時性),這裡就會紅燈。
+        // This is the package's core promise about terminal failures: IsTransient alone tells the caller not to
+        // retry, with no need — and no excuse — to branch on the error code. Putting the category back to the
+        // transient Unavailable turns this test red.
+        Assert.AreEqual(ErrorCategory.Exhausted, terminal.Category);
+        Assert.IsFalse(
+            terminal.IsTransient,
+            "重連用盡是終局失敗:重試不可能成功,必須換一個新的客戶端,IsTransient 一定要是 false");
+
+        // 放棄前試了幾次要能用程式讀回來,不必從訊息字串 parse。
+        // How many attempts were made must be readable programmatically rather than parsed out of the message.
+        Assert.IsTrue(terminal.TryGetInt64("attempts", out var attempts), "錯誤要帶上 attempts 資料");
+        Assert.AreEqual(1L, attempts, "MaxReconnectAttempts 設為 1,放棄前就是試了 1 次");
 
         // 終局失敗之後串流必須結束,否則呼叫端會永遠停在 await foreach 上。
         // The stream must end after a terminal failure, or the caller waits on await foreach forever.
