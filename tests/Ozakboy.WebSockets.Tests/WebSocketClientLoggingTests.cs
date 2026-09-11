@@ -1,0 +1,198 @@
+using System.Net.WebSockets;
+using Microsoft.Extensions.Logging;
+
+namespace Ozakboy.WebSockets.Tests;
+
+/// <summary>
+/// 事故之後只剩日誌可查,所以重連、丟棄、放棄這三類事件必須留下痕跡。
+/// After an incident the log is the only record, so reconnects, drops, and giving up must all leave a trace.
+/// </summary>
+[TestClass]
+public sealed class WebSocketClientLoggingTests
+{
+    private const int ConnectedEventId = 1000;
+    private const int ConnectFailedEventId = 1001;
+    private const int ConnectionLostEventId = 1002;
+    private const int ReconnectDelayEventId = 1003;
+    private const int ReconnectExhaustedEventId = 1004;
+    private const int IdleTimeoutEventId = 1005;
+    private const int SubscriptionsReplayedEventId = 1006;
+    private const int SubscriptionReplayFailedEventId = 1007;
+    private const int MessageDroppedEventId = 1008;
+    private const int ApplicationPingFailedEventId = 1010;
+    private const int EventHandlerFailedEventId = 1011;
+    private const int ClosedGracefullyEventId = 1012;
+    private const int CloseTimedOutEventId = 1013;
+
+    [TestMethod]
+    public async Task 連線與優雅關閉_都有留下日誌()
+    {
+        var logger = new RecordingLogger();
+        var time = new TestTimeProvider(DateTimeOffset.UnixEpoch);
+        var factory = new FakeWebSocketConnectionFactory(time);
+        var options = Options();
+
+        await using (var client = new WebSocketClient(options, factory, logger, time))
+        {
+            await client.ConnectAsync();
+            await client.CloseAsync();
+        }
+
+        Assert.IsTrue(logger.HasEvent(ConnectedEventId), "連線成功要有日誌");
+        Assert.IsTrue(logger.HasEvent(ClosedGracefullyEventId), "優雅關閉要有日誌");
+    }
+
+    [TestMethod]
+    public async Task 斷線重連重放與放棄_都有留下日誌()
+    {
+        var logger = new RecordingLogger();
+        var time = new TestTimeProvider(DateTimeOffset.UnixEpoch);
+        var factory = new FakeWebSocketConnectionFactory(time);
+        var options = Options();
+        options.MaxReconnectAttempts = 2;
+
+        factory.Configure = (connection, ordinal) =>
+        {
+            if (ordinal == 2)
+            {
+                connection.SendException = new WebSocketException(WebSocketError.Faulted, "重放送不出去");
+            }
+            else if (ordinal >= 3)
+            {
+                connection.ConnectException = new WebSocketException(WebSocketError.Faulted, "連不上");
+            }
+        };
+
+        await using (var client = new WebSocketClient(options, factory, logger, time))
+        {
+            // 先訂閱再連線,第一條連線就會走到重放這條路徑。
+            // Subscribing before connecting makes the very first connection go through the replay path.
+            await client.SubscribeAsync(new WebSocketSubscription("btc", "sub-btc"));
+            await client.ConnectAsync();
+            factory[0].PushFault();
+
+            await Wait.UntilAsync(
+                () =>
+                {
+                    if (time.ArmedTimerCount > 0)
+                    {
+                        time.Advance(TimeSpan.FromSeconds(1));
+                    }
+
+                    return client.State == WebSocketClientState.Closed;
+                },
+                "重連用盡後關閉");
+        }
+
+        Assert.IsTrue(logger.HasEvent(SubscriptionsReplayedEventId), "重放訂閱要有日誌");
+        Assert.IsTrue(logger.HasEvent(SubscriptionReplayFailedEventId), "重放失敗要有日誌");
+        Assert.IsTrue(logger.HasEvent(ConnectionLostEventId), "斷線要有日誌");
+        Assert.IsTrue(logger.HasEvent(ConnectFailedEventId), "連線失敗要有日誌");
+        Assert.IsTrue(logger.HasEvent(ReconnectDelayEventId), "退避等待要有日誌");
+        Assert.IsTrue(logger.HasEvent(ReconnectExhaustedEventId), "放棄重連一定要有日誌,這是需要告警的事件");
+
+        var exhausted = logger.Entries.Single(entry => entry.EventId.Id == ReconnectExhaustedEventId);
+        Assert.AreEqual(LogLevel.Error, exhausted.Level, "資料流停擺必須是 Error 等級");
+    }
+
+    [TestMethod]
+    public async Task 丟棄訊息與閒置逾時_都有留下日誌()
+    {
+        var logger = new RecordingLogger();
+        var time = new TestTimeProvider(DateTimeOffset.UnixEpoch);
+        var factory = new FakeWebSocketConnectionFactory(time);
+        var options = Options();
+        options.QueueCapacity = 1;
+        options.IdleTimeout = TimeSpan.FromSeconds(30);
+        options.IdleCheckInterval = TimeSpan.FromSeconds(5);
+
+        await using (var client = new WebSocketClient(options, factory, logger, time))
+        {
+            await client.ConnectAsync();
+
+            factory[0].PushText("a");
+            factory[0].PushText("b");
+            await Wait.UntilAsync(() => client.Statistics.MessagesDropped >= 1, "有訊息被丟棄");
+
+            time.Advance(TimeSpan.FromSeconds(31));
+            await Wait.UntilAsync(() => factory.CreateCount >= 2, "閒置逾時後重連");
+        }
+
+        Assert.IsTrue(logger.HasEvent(MessageDroppedEventId), "丟棄訊息一定要有日誌,不能靜默消失");
+        Assert.IsTrue(logger.HasEvent(IdleTimeoutEventId), "閒置逾時要有日誌");
+    }
+
+    [TestMethod]
+    public async Task 事件處理常式擲出例外與ping失敗_都有留下日誌()
+    {
+        var logger = new RecordingLogger();
+        var time = new TestTimeProvider(DateTimeOffset.UnixEpoch);
+        var factory = new FakeWebSocketConnectionFactory(time);
+        var options = Options();
+        options.ApplicationPingInterval = TimeSpan.FromSeconds(10);
+        options.ApplicationPingPayloadFactory = () => "ping";
+        factory.Configure = (connection, _) =>
+            connection.SendException = new WebSocketException(WebSocketError.Faulted, "送不出去");
+
+        await using (var client = new WebSocketClient(options, factory, logger, time))
+        {
+            client.StateChanged += (_, _) => throw new InvalidOperationException("處理常式故意爆炸");
+
+            await client.ConnectAsync();
+            time.Advance(TimeSpan.FromSeconds(15));
+            await Wait.UntilAsync(() => logger.HasEvent(ApplicationPingFailedEventId), "ping 失敗留下日誌");
+        }
+
+        Assert.IsTrue(logger.HasEvent(EventHandlerFailedEventId), "事件處理常式的例外要被記錄,不能靜默吞掉");
+    }
+
+    [TestMethod]
+    public async Task 對方不回覆關閉frame_逾時會留下日誌()
+    {
+        var logger = new RecordingLogger();
+        var time = new TestTimeProvider(DateTimeOffset.UnixEpoch);
+        var factory = new FakeWebSocketConnectionFactory(time);
+        var options = Options();
+        options.CloseTimeout = TimeSpan.FromSeconds(5);
+        factory.Configure = (connection, _) => connection.EchoClose = false;
+
+        await using (var client = new WebSocketClient(options, factory, logger, time))
+        {
+            await client.ConnectAsync();
+
+            var closeTask = client.CloseAsync();
+            await Wait.UntilAsync(
+                () =>
+                {
+                    if (time.ArmedTimerCount > 0)
+                    {
+                        time.Advance(TimeSpan.FromSeconds(1));
+                    }
+
+                    return closeTask.IsCompleted;
+                },
+                "關閉逾時觸發");
+
+            await closeTask;
+        }
+
+        Assert.IsTrue(logger.HasEvent(CloseTimedOutEventId));
+    }
+
+    private static WebSocketClientOptions Options() => new()
+    {
+        Uri = new Uri("wss://example.invalid/stream"),
+        IdleTimeout = TimeSpan.Zero,
+        ConnectTimeout = TimeSpan.FromHours(1),
+        CloseTimeout = TimeSpan.FromSeconds(5),
+        QueueCapacity = 16,
+        ReconnectPolicy = new RetryPolicy
+        {
+            MaxAttempts = int.MaxValue,
+            BaseDelay = TimeSpan.FromSeconds(1),
+            MaxDelay = TimeSpan.FromSeconds(4),
+            Strategy = BackoffStrategy.Exponential,
+            JitterRatio = 0d,
+        },
+    };
+}

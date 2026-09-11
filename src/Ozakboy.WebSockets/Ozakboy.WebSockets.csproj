@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>Ozakboy.WebSockets</PackageId>
+    <AssemblyName>Ozakboy.WebSockets</AssemblyName>
+    <RootNamespace>Ozakboy.WebSockets</RootNamespace>
+
+    <Title>Ozakboy.WebSockets — 長時間執行的 WebSocket 客戶端</Title>
+    <Description>建立在 BCL ClientWebSocket 之上的長命 WebSocket 客戶端:自動重連(退避+抖動)、重連後自動重放訂閱、閒置逾時存活偵測(ClientWebSocket 的 ping/pong 在協定層自動處理,應用層看不到,只有「多久沒收到訊息」能發現靜默的假連線)、System.Threading.Channels 有界佇列背壓與可觀察的丟棄、以 Result&lt;T&gt; 表達預期失敗。不含任何交易所專屬邏輯,也不做反序列化。A long-lived WebSocket client on top of the BCL ClientWebSocket: automatic reconnect with backoff and jitter, subscription replay after reconnect, idle-timeout liveness detection, bounded-channel backpressure with observable drops, and Result-based failures.</Description>
+    <PackageTags>ozakboy;websocket;websockets;clientwebsocket;reconnect;auto-reconnect;backoff;jitter;heartbeat;idle-timeout;keepalive;backpressure;bounded-channel;channels;subscription;streaming;realtime;market-data;resilience;dotnet;csharp</PackageTags>
+
+    <PackageProjectUrl>https://github.com/ozakboy/Ozakboy.WebSockets</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ozakboy/Ozakboy.WebSockets</RepositoryUrl>
+
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\logo.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!--
+    相依政策:只允許 .NET BCL、Microsoft 官方套件與 Ozakboy.* 自研套件,判定看的是遞移相依樹而非套件名稱。
+    Microsoft.Extensions.Logging.Abstractions 只帶進 Microsoft.Extensions.DependencyInjection.Abstractions
+    與 Microsoft.Extensions.Options,整棵樹仍然只有 Microsoft.* 與 System.*。
+    Dependency policy: BCL, Microsoft first-party packages, and Ozakboy.* only, judged by the transitive graph
+    rather than by package name. The logging abstractions pull in nothing outside Microsoft.* and System.*.
+  -->
+  <!--
+    測試專案需要驗證少數內部輔助邏輯(例如閒置檢查間隔的推導),為此把它們提升為公開 API 會讓契約
+    多出不該由呼叫端看到的東西。
+    The test project verifies a few internal helpers, such as how the idle check interval is derived. Promoting them
+    to public API just for that would add things to the contract that callers have no business seeing.
+  -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ozakboy.WebSockets.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Ozakboy.Core.Abstractions" Version="0.2.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+
+  <!--
+    刻意不引用 Microsoft.SourceLink.GitHub 套件。
+    自 .NET 8 起 SourceLink 已內建於 SDK,只要設定 PublishRepositoryUrl 與 EmbedUntrackedSources
+    (見 Directory.Build.props)即可產生原始碼連結;外掛套件反而會帶進額外的相依鏈,也會讓還原失敗。
+    Deliberately does not reference Microsoft.SourceLink.GitHub: the SDK has had SourceLink built in since
+    .NET 8, and the add-on package only adds a dependency chain (and breaks restore).
+  -->
+
+</Project>

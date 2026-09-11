@@ -1,0 +1,52 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # SourceLink 需要完整歷史
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      # 本 repo 的測試專案走 Microsoft.Testing.Platform 而非舊的 VSTest(見 tests 的 csproj:
+      # VSTest 那條路徑會遞移帶進第三方的 Newtonsoft.Json,違反本專案的相依政策)。
+      # MTP 不認得 VSTest 的 --logger,產生 trx 的等效寫法是 --report-trx。
+      # 涵蓋率設定檔把相依套件與測試組件排除在外,數字才會是「這個套件被測到多少」,
+      # 而不是「這個套件用到相依套件的多少功能」。
+      # The coverage settings exclude the dependency and the test assembly, so the number means "how much of this
+      # package is tested" rather than "how much of the dependency this package happens to use".
+      - name: Test
+        run: >
+          dotnet test --configuration Release --no-build --verbosity normal
+          --report-trx --report-trx-filename test-results.trx
+          --coverage --coverage-settings tests/Ozakboy.WebSockets.Tests/CodeCoverage.config
+          --coverage-output-format cobertura --coverage-output coverage.cobertura.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            **/TestResults/*.trx
+            **/TestResults/coverage.cobertura.xml
+          if-no-files-found: ignore
