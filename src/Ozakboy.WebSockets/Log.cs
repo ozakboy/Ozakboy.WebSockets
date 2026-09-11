@@ -16,8 +16,25 @@ namespace Ozakboy.WebSockets;
 /// </remarks>
 internal static partial class Log
 {
+    /// <summary>
+    /// 記錄連線成功。<paramref name="endpoint"/> <b>只能是 scheme 與主機</b>,不可包含路徑或查詢字串。
+    /// Records a successful connection. <paramref name="endpoint"/> <b>must be scheme and host only</b>, never
+    /// the path or query.
+    /// </summary>
+    /// <remarks>
+    /// 路徑會夾帶憑證。幣安的使用者資料串流就是 <c>wss://…/ws/&lt;listenKey&gt;</c> —— 那把 listenKey 能連上
+    /// 帳戶的私有資料,而這行日誌在 Information 層級、每次重連都寫一次;一天重連上百次,日誌裡就有上百份
+    /// 可用的憑證,而日誌通常不加密、會被複製、會被貼給別人看。要知道連到哪個主機,authority 就夠了。
+    /// A path can carry a credential. A Binance user data stream is literally <c>wss://…/ws/&lt;listenKey&gt;</c>,
+    /// and that key opens the account's private data — while this line is written at Information level on every
+    /// reconnect. A few hundred reconnects a day puts a few hundred usable credentials into a log that is
+    /// typically unencrypted, copied around, and pasted to other people. The authority alone answers the only
+    /// question this line is asked: which host.
+    /// </remarks>
+    /// <param name="logger">記錄器。The logger.</param>
+    /// <param name="endpoint">連線目標的 scheme 與主機。The scheme and host connected to.</param>
     [LoggerMessage(EventId = 1000, Level = LogLevel.Information, Message = "WebSocket 已連線。WebSocket connected to {Endpoint}.")]
-    internal static partial void Connected(ILogger logger, Uri endpoint);
+    internal static partial void Connected(ILogger logger, string endpoint);
 
     [LoggerMessage(EventId = 1001, Level = LogLevel.Warning, Message = "WebSocket 連線失敗(第 {Attempt} 次):{Reason}。WebSocket connection attempt failed.")]
     internal static partial void ConnectFailed(ILogger logger, int attempt, string reason);

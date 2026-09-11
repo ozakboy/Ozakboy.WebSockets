@@ -13,6 +13,8 @@
     <RepositoryUrl>https://github.com/ozakboy/Ozakboy.WebSockets</RepositoryUrl>
 
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <PackageReleaseNotes>0.2.1 — Security fix: the connection log no longer writes the URI's path or query, only the scheme and host. A path can carry a credential (a Binance user data stream is wss://host/ws/&lt;listenKey&gt;) and this line is written on every reconnect, so the log was accumulating usable credentials. Full notes: https://github.com/ozakboy/Ozakboy.WebSockets/blob/main/CHANGELOG.md</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup>

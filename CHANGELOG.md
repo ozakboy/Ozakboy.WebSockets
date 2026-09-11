@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-11
+
+### 問題修正 / Fixed
+
+- **連線成功的日誌不再寫出 URI 的路徑與查詢字串,只留 scheme 與主機。**
+  路徑會夾帶憑證:幣安的使用者資料串流就是 `wss://host/ws/<listenKey>`,而那把 listenKey 能連上帳戶的
+  私有資料。這行日誌在 Information 層級、**每次重連都寫一次** —— 一天重連上百次,日誌裡就有上百份可用的
+  憑證,而日誌通常不加密、會被複製、會被貼給別人看。要知道連到哪個主機,authority 就夠了。
+  authority 改為建構時算一次(順帶滿足 CA1873:在日誌呼叫的引數裡算字串,即使該層級沒啟用也會照算)。
+  **The connection log no longer writes the URI's path or query, only the scheme and host.** A path can carry a
+  credential — a Binance user data stream is literally `wss://host/ws/<listenKey>`, and that key opens the
+  account's private data — while this line is written at Information level **on every reconnect**. A few hundred
+  reconnects a day puts a few hundred usable credentials into a log that is typically unencrypted, copied around,
+  and pasted to other people. The authority is now computed once in the constructor, which also satisfies CA1873.
+
+  對日誌的消費端而言這是輸出內容的變更:事件代碼與層級不變,`{Endpoint}` 由完整 URI 變成 `wss://host`。
+  For log consumers this changes output: the event id and level are unchanged, but `{Endpoint}` goes from the
+  full URI to `wss://host`.
+
 ## [0.2.0] - 2026-09-11
 
 Upgrades to `Ozakboy.Core.Abstractions` 0.3.0 and uses its new `ErrorCategory.Exhausted` to close the one known

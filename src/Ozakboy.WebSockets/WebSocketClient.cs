@@ -55,6 +55,19 @@ public sealed class WebSocketClient : IWebSocketClient
     private readonly TimeProvider _timeProvider;
     private readonly ILogger _logger;
 
+    /// <summary>
+    /// 連線目標的 scheme 與主機,連線日誌只寫這個。路徑與查詢字串刻意不留,見 <see cref="Log.Connected"/>。
+    /// The scheme and host connected to; the connection log carries only this. The path and query are
+    /// deliberately dropped — see <see cref="Log.Connected"/>.
+    /// </summary>
+    /// <remarks>
+    /// 建構時算一次而不是每次連線現算:這個值不會變,而且在日誌呼叫的引數裡算字串,
+    /// 即使該層級沒有啟用也會照算(CA1873)。
+    /// Computed once rather than per connection: the value never changes, and computing a string inside a
+    /// logging call's argument runs even when the level is disabled (CA1873).
+    /// </remarks>
+    private readonly string _endpointAuthority;
+
     private readonly Channel<Result<WebSocketMessage>> _queue;
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly Lock _stateGate = new();
@@ -173,6 +186,10 @@ public sealed class WebSocketClient : IWebSocketClient
         _options = options;
         _connectionFactory = connectionFactory;
         _logger = logger ?? NullLogger<WebSocketClient>.Instance;
+
+        // Validate 已經確認 Uri 有值且為絕對位址,這裡不會是 null。
+        // Validate has already established that Uri is set and absolute, so this cannot be null.
+        _endpointAuthority = options.Uri!.GetLeftPart(UriPartial.Authority);
         _timeProvider = timeProvider ?? TimeProvider.System;
 
         _queue = Channel.CreateBounded<Result<WebSocketMessage>>(
@@ -657,7 +674,10 @@ public sealed class WebSocketClient : IWebSocketClient
 
             Volatile.Write(ref _connection, connection);
             StartTimers();
-            Log.Connected(_logger, _options.Uri!);
+            // 只記 scheme 與主機。路徑會夾帶憑證 —— 幣安的使用者資料串流就是 wss://…/ws/<listenKey>,
+            // 而這行每次重連都寫一次。見 Log.Connected 的說明。
+            // Scheme and host only: the path can carry a credential, and this line is written on every reconnect.
+            Log.Connected(_logger, _endpointAuthority);
             connection = null;
             return Result.Success();
         }

@@ -220,6 +220,41 @@ public sealed class WebSocketClientLoggingTests
         Assert.IsTrue(logger.HasEvent(CloseTimedOutEventId));
     }
 
+    [TestMethod]
+    public async Task 連線日誌只留主機_不留可能夾帶憑證的路徑()
+    {
+        // 幣安的使用者資料串流就是 wss://host/ws/<listenKey>,而那把 listenKey 能連上帳戶的私有資料。
+        // 這行日誌在 Information 層級、每次重連都寫一次,若連路徑一起寫,日誌就成了憑證的副本。
+        const string Credential = "s3cr3tListenKeyValue";
+
+        var logger = new RecordingLogger();
+        var time = new TestTimeProvider(DateTimeOffset.UnixEpoch);
+        var factory = new FakeWebSocketConnectionFactory(time);
+        var options = Options();
+        options.Uri = new Uri($"wss://example.invalid/ws/{Credential}?token={Credential}");
+
+        await using (var client = new WebSocketClient(options, factory, logger, time))
+        {
+            await client.ConnectAsync();
+            await client.CloseAsync();
+        }
+
+        Assert.IsTrue(logger.HasEvent(ConnectedEventId), "連線成功要有日誌");
+
+        foreach (var entry in logger.Entries)
+        {
+            Assert.DoesNotContain(
+                Credential,
+                entry.Message,
+                StringComparison.Ordinal,
+                $"第 {entry.EventId} 號日誌寫出了 URI 路徑裡的憑證:{entry.Message}");
+        }
+
+        var connected = logger.Entries.First(entry => entry.EventId == ConnectedEventId);
+
+        Assert.Contains("example.invalid", connected.Message, StringComparison.Ordinal, "仍要看得出連到哪個主機");
+    }
+
     private static WebSocketClientOptions Options() => new()
     {
         Uri = new Uri("wss://example.invalid/stream"),
