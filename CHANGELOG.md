@@ -11,8 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-09-11
 
 Upgrades to `Ozakboy.Core.Abstractions` 0.3.0 and uses its new `ErrorCategory.Exhausted` to close the one known
-limitation of 0.1.0.
-升級到 `Ozakboy.Core.Abstractions` 0.3.0,並用它新增的 `ErrorCategory.Exhausted` 解除 0.1.0 唯一的已知限制。
+limitation of 0.1.0 — then puts that same `IsTransient` contract to work in the reconnect loop, where it fixes a
+failure that never stops and never recovers.
+升級到 `Ozakboy.Core.Abstractions` 0.3.0,用它新增的 `ErrorCategory.Exhausted` 解除 0.1.0 唯一的已知限制,
+並把同一套 `IsTransient` 契約用回重連迴圈,修掉一個不會停止也不會恢復的失敗。
 
 ### Changed / 功能優化
 
@@ -39,8 +41,48 @@ limitation of 0.1.0.
   `IWebSocketClient.Messages`、`WebSocketErrorCodes` 與兩份 README 不再要求呼叫端比對錯誤代碼,改為指向
   `IsTransient`。
 
+### Fixed / 問題修正
+
+- **A non-transient failure no longer sends the reconnect loop spinning forever.** The options object is mutable and
+  held by reference, and the loop re-validates it on every attempt, so anything that breaks the configuration after
+  the client has started — setting `Uri` to `null`, say — used to produce the same non-transient `ws.options_invalid`
+  on every attempt, and the loop backed off and tried again regardless. With `MaxReconnectAttempts` defaulting to
+  unlimited, which is exactly what a round-the-clock process is told to use, that loop never ended. **The symptom to
+  recognise is not a crash: the process stays up, the reconnect log keeps scrolling, the state keeps flipping between
+  Reconnecting and Connecting, and it looks like work — but no data will ever arrive again.** The loop now checks
+  `error.IsTransient` before retrying and ends for good when it is `false`, which is what that property is for.
+  Transient failures — `Network`, `Timeout`, `Unavailable`, `RateLimited` — still reconnect without limit, and the
+  decision reads `IsTransient` rather than singling out a code, so any non-transient error added later is covered.
+  **非暫時性失敗不會再讓重連迴圈永遠空轉。** 設定物件是可變的、由參照持有,而重連迴圈每次嘗試都重跑
+  `Validate()`,所以客戶端跑起來之後被改壞的設定(例如把 `Uri` 設成 `null`)會讓每一次重連都收到同一個
+  非暫時性的 `ws.options_invalid`,迴圈卻照樣退避重試。而 `MaxReconnectAttempts` 預設無限 —— 那正是
+  24 小時執行的建議設定 —— 於是這個迴圈永遠不會結束。**要認出這個問題,別找當機:行程還活著、重連日誌
+  一直在刷、狀態在重連中與連線中之間來回跳,看起來像在工作,但資料再也不會進來。** 現在迴圈會在重試前
+  先看 `error.IsTransient`,為 `false` 就終局結束 —— 那本來就是這個屬性存在的意義。暫時性失敗
+  (`Network`、`Timeout`、`Unavailable`、`RateLimited`)照舊無限重連;判斷依 `IsTransient` 而不是針對
+  特定代碼特判,日後新增的非暫時性錯誤自動適用。
+
 ### Added / 新增功能
 
+- `WebSocketCloseReason.UnrecoverableError` — the ending for the case above. Reusing
+  `ReconnectAttemptsExhausted` would have been a lie: that one means "tried many times and failed" and sends whoever
+  is on call to check the peer, while this one means "must not try even once" and has its cause on this side. The
+  terminal error published to the message stream is the new `ws.unrecoverable`, categorised `Exhausted` so
+  `IsTransient` is `false`, and its `Error.Data` carries `innerCode` and `innerCategory` — the failure that made the
+  client give up — plus `attempts`. It is logged at `Error` under its own event id (1014), separate from the
+  reconnect-exhausted one.
+  `WebSocketCloseReason.UnrecoverableError` —— 上面那個情況的結局。沿用 `ReconnectAttemptsExhausted` 是說謊:
+  那代表「試過很多次都失敗」,會把值班的人帶去查對方;而這裡是「一次都不該試」,原因在自己這邊。送進訊息
+  串流的終局錯誤是新的 `ws.unrecoverable`,分類為 `Exhausted`(`IsTransient` 為 `false`),`Error.Data` 帶
+  `innerCode` 與 `innerCategory`(害它放棄的那個錯誤)以及 `attempts`。日誌以獨立的事件代碼 1014 記在
+  `Error` 等級,與重連用盡分得開。
+- `WebSocketErrorDataKeys` — the `Error.Data` keys are now public constants. Exposing the codes but not the keys was
+  an inconsistency with teeth: reading `Error.Data` meant writing `"attempts"` by hand, and a typo there has no
+  symptom at all — it compiles, it does not throw, `TryGetXxx` just returns `false` and the field is quietly empty
+  forever. Each key documents which codes carry it, the value's type, and its unit.
+  `WebSocketErrorDataKeys` —— `Error.Data` 的資料鍵改為公開常數。代碼公開而資料鍵不公開是會咬人的不一致:
+  讀 `Error.Data` 只能硬寫 `"attempts"`,而那種字串打錯完全沒有徵兆 —— 編譯得過、不擲例外,`TryGetXxx`
+  只是安靜地回傳 `false`,欄位就永遠是空的。每個鍵都註明了哪些錯誤代碼會帶它、值的型別與單位。
 - Errors carry their numbers in `Error.Data`, so downstream code reads them back with `TryGetInt64` / `TryGetData`
   instead of parsing message text: `attempts` on `ws.reconnect_exhausted`, `timeoutMs` on `ws.connect_timeout` and
   `ws.idle_timeout`, `limitBytes` on `ws.message_too_large`, `subscriptionId` on the two subscription errors (plus
@@ -63,10 +105,16 @@ limitation of 0.1.0.
 - `Ozakboy.Core.Abstractions` 0.2.1 → 0.3.0. The dependency graph still contains nothing but `Microsoft.*` and
   `System.*`.
   `Ozakboy.Core.Abstractions` 0.2.1 → 0.3.0。相依樹仍然只有 `Microsoft.*` 與 `System.*`。
-- Two tests added, 98 → 100: one pins `IsTransient` to `false` on `ws.reconnect_exhausted` — the point of this
-  release — and one covers the non-transient `ws.not_connected` after close. Still no test opens a socket.
-  新增兩條測試,98 → 100:一條把 `ws.reconnect_exhausted` 的 `IsTransient` 鎖死為 `false`(這次改版的重點),
-  一條涵蓋關閉之後非暫時性的 `ws.not_connected`。仍然沒有任何一條測試開過 socket。
+- Seven tests added, 98 → 105. Two pin the category work: `IsTransient` is `false` on `ws.reconnect_exhausted` and on
+  `ws.not_connected` after close. Five cover the reconnect fix and the public keys: a configuration broken at runtime
+  ends the client instead of spinning (the fake clock is deliberately never advanced, so a client that did back off
+  would fail the test by timing out), transient failures still reconnect without limit, the two ways of giving up
+  leave different log events, and the key constants both hold their contract values and read real values back. Still
+  no test opens a socket.
+  新增七條測試,98 → 105。兩條鎖住分類的成果:`ws.reconnect_exhausted` 與關閉之後的 `ws.not_connected`,
+  `IsTransient` 都必須是 `false`。五條涵蓋重連修正與公開資料鍵:設定在執行期被改壞時客戶端終局結束而不是
+  空轉(那條刻意完全不推進假時鐘,所以只要客戶端真的去退避重試就會等不到而失敗)、暫時性失敗仍然無限重連、
+  兩種放棄留下的是不同的日誌事件,以及資料鍵常數的值與實際讀取。仍然沒有任何一條測試開過 socket。
 
 ## [0.1.0] - 2026-09-11
 

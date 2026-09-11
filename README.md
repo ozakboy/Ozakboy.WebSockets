@@ -99,14 +99,14 @@ await foreach (var item in client.Messages(cancellationToken))
 
     // A failure means the connection dropped here and data may be missing.
     // IsTransient says which kind it is: true is a gap and the stream carries on,
-    // false is terminal (ws.reconnect_exhausted) and this is the last element.
+    // false is terminal — the client has stopped and this is the last element.
     if (item.Error.IsTransient)
     {
         logger.LogWarning("Gap in the stream: {Error}", item.Error);
         continue;
     }
 
-    item.Error.TryGetInt64("attempts", out var attempts);
+    item.Error.TryGetInt64(WebSocketErrorDataKeys.Attempts, out var attempts);
     logger.LogError("The client has stopped after {Attempts} attempts: {Error}", attempts, item.Error);
 }
 ```
@@ -153,7 +153,7 @@ The two numbers that matter most:
 - `MessagesDropped` — anything above zero means data has already gone unprocessed.
 - `ReconnectCount` vs `SubscriptionReplayCount` — these should grow together. Reconnects climbing while replays stay put is what "connected but never resubscribed" looks like.
 
-`State` and `CloseReason` tell a normal shutdown apart from an exhausted reconnect loop. Both end at `Closed`; only one of them deserves an alert.
+`State` and `CloseReason` tell a normal shutdown apart from one that needs an alert. Everything ends at `Closed`, so the reason is what separates `CallerRequested` from `ReconnectAttemptsExhausted` (the attempts ran out) and `UnrecoverableError` (a failure retrying could not fix — look on your own side, not at the peer).
 
 ---
 
@@ -168,7 +168,8 @@ Branch on `WebSocketErrorCodes`, not on message text. Messages are for people an
 | `ws.connect_timeout` | Timeout | Handshake did not finish in time |
 | `ws.connection_lost` | Network | The connection dropped; a gap in the data |
 | `ws.idle_timeout` | Timeout | Nothing arrived within the idle window |
-| `ws.reconnect_exhausted` | **Exhausted** (not transient) | Gave up; the client has stopped — **the last element in the stream** |
+| `ws.reconnect_exhausted` | **Exhausted** (not transient) | Gave up after the attempts ran out; the client has stopped — **the last element in the stream** |
+| `ws.unrecoverable` | **Exhausted** (not transient) | Gave up on a failure retrying cannot fix, without retrying once — **the last element in the stream** |
 | `ws.not_connected` | Unavailable, or **Exhausted** once the client is closed | Nothing to send on right now |
 | `ws.send_failed` | Network | The send failed |
 | `ws.subscription_replay_failed` | Network | A replay failed; the connection was abandoned and retried |
@@ -183,21 +184,33 @@ but this client instance is finished and retrying it can never work — retrying
 is `Exhausted`, not the transient `Unavailable`. `ws.not_connected` follows the same rule: transient while the client
 is connecting or reconnecting, `Exhausted` once it has closed for good.
 
-The numbers in an error message are also in `Error.Data`, so you never have to parse the text:
+The loop applies that same rule to itself. A failure whose `IsTransient` is `false` is never retried — retrying could
+not change the outcome — so the client ends with `ws.unrecoverable` and `CloseReason.UnrecoverableError` instead of
+backing off forever. Transient failures still reconnect without limit.
 
-| Code | Data keys |
+The numbers in an error message are also in `Error.Data`, so you never have to parse the text. The keys are public
+constants on `WebSocketErrorDataKeys` — read them from there rather than writing the literal, because a typo in a
+key has no symptom at all: it compiles, it does not throw, and `TryGetXxx` just returns `false`.
+
+| Code | Data keys (`WebSocketErrorDataKeys`) |
 | --- | --- |
-| `ws.reconnect_exhausted` | `attempts` |
-| `ws.connect_timeout`, `ws.idle_timeout` | `timeoutMs` |
-| `ws.message_too_large` | `limitBytes` |
-| `ws.subscription_not_found` | `subscriptionId` |
-| `ws.subscription_replay_failed` | `subscriptionId`, `innerCode` |
-| `ws.not_connected` | `state` |
-| `ws.invalid_state` | `state`, `operation` |
-| `ws.cancelled` | `operation` |
+| `ws.reconnect_exhausted` | `Attempts` |
+| `ws.unrecoverable` | `InnerCode`, `InnerCategory`, `Attempts` |
+| `ws.connect_timeout`, `ws.idle_timeout` | `TimeoutMs` |
+| `ws.message_too_large` | `LimitBytes` |
+| `ws.subscription_not_found` | `SubscriptionId` |
+| `ws.subscription_replay_failed` | `SubscriptionId`, `InnerCode` |
+| `ws.not_connected` | `State` |
+| `ws.invalid_state` | `State`, `Operation` |
+| `ws.cancelled` | `Operation` |
+
+`Attempts` is a count, `TimeoutMs` is milliseconds and `LimitBytes` is bytes — all three read with `TryGetInt64`.
+The rest are strings read with `TryGetData`; `State` holds a `WebSocketClientState` name, `InnerCode` a
+`WebSocketErrorCodes` value, and `InnerCategory` an `ErrorCategory` name.
 
 ```csharp
-error.TryGetInt64("attempts", out var attempts);
+error.TryGetInt64(WebSocketErrorDataKeys.Attempts, out var attempts);
+error.TryGetData(WebSocketErrorDataKeys.InnerCode, out var innerCode);
 ```
 
 ---
@@ -210,7 +223,7 @@ error.TryGetInt64("attempts", out var attempts);
 var client = new WebSocketClient(options, myFakeFactory, logger, myFakeClock);
 ```
 
-That is exactly how this package's own tests work — 100 of them, none of which open a socket.
+That is exactly how this package's own tests work — 105 of them, none of which open a socket.
 
 ---
 

@@ -43,4 +43,31 @@ public enum WebSocketCloseReason
     /// The instance was released through <see cref="System.IAsyncDisposable.DisposeAsync"/>.
     /// </summary>
     Disposed = 4,
+
+    /// <summary>
+    /// 遇到非暫時性的失敗而放棄,一次都沒有重試。同樣需要告警。
+    /// Gave up on a non-transient failure without retrying even once. This also needs an alert.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 與 <see cref="ReconnectAttemptsExhausted"/> 的差別是「試過很多次都失敗」對「一次都不該試」。
+    /// 重試不可能改變非暫時性失敗的結果 —— 設定在執行期被改壞就是最典型的例子 —— 所以繼續退避重試只會
+    /// 無限空轉:不會崩潰、不會停止、日誌一直在動,看起來像在工作。這兩種結局必須分得出來,否則值班的人
+    /// 會照著「重連用盡」去查對方的可用性,而真正的原因在自己這邊。
+    /// The difference from <see cref="ReconnectAttemptsExhausted"/> is "tried many times and failed" versus "must not
+    /// try even once". Retrying cannot change the outcome of a non-transient failure — a configuration mutated after
+    /// start-up being the clearest case — so backing off and trying again would only spin forever: no crash, no stop,
+    /// a log that keeps moving and looks like work. The two endings have to be distinguishable, or whoever is on call
+    /// goes looking at the peer's availability when the cause is on this side.
+    /// </para>
+    /// <para>
+    /// 害客戶端放棄的那個錯誤,其代碼與分類放在終局錯誤的
+    /// <see cref="Core.Abstractions.Error.Data"/> 裡(<see cref="WebSocketErrorDataKeys.InnerCode"/> 與
+    /// <see cref="WebSocketErrorDataKeys.InnerCategory"/>)。
+    /// The code and category of the failure that made the client give up are in the terminal error's
+    /// <see cref="Core.Abstractions.Error.Data"/>, as <see cref="WebSocketErrorDataKeys.InnerCode"/> and
+    /// <see cref="WebSocketErrorDataKeys.InnerCategory"/>.
+    /// </para>
+    /// </remarks>
+    UnrecoverableError = 5,
 }

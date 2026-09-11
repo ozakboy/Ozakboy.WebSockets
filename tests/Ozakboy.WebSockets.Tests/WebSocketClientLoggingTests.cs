@@ -23,6 +23,7 @@ public sealed class WebSocketClientLoggingTests
     private const int EventHandlerFailedEventId = 1011;
     private const int ClosedGracefullyEventId = 1012;
     private const int CloseTimedOutEventId = 1013;
+    private const int UnrecoverableEventId = 1014;
 
     [TestMethod]
     public async Task 連線與優雅關閉_都有留下日誌()
@@ -93,6 +94,46 @@ public sealed class WebSocketClientLoggingTests
 
         var exhausted = logger.Entries.Single(entry => entry.EventId.Id == ReconnectExhaustedEventId);
         Assert.AreEqual(LogLevel.Error, exhausted.Level, "資料流停擺必須是 Error 等級");
+    }
+
+    /// <summary>
+    /// 「放棄」有兩種,日誌必須分得出來:值班的人看到「重連 N 次後放棄」會去查對方的可用性,
+    /// 但非暫時性失敗的原因在自己這邊,查對方只會浪費時間。
+    /// There are two ways to give up and the log has to tell them apart: "gave up after N reconnects" sends whoever
+    /// is on call to check the peer's availability, while a non-transient failure has its cause on this side and
+    /// looking at the peer only wastes their time.
+    /// </summary>
+    [TestMethod]
+    public async Task 非暫時性失敗放棄_日誌與重連用盡分得出來()
+    {
+        var logger = new RecordingLogger();
+        var time = new TestTimeProvider(DateTimeOffset.UnixEpoch);
+        var factory = new FakeWebSocketConnectionFactory(time);
+        var options = Options();
+
+        await using (var client = new WebSocketClient(options, factory, logger, time))
+        {
+            await client.ConnectAsync();
+
+            // 客戶端已經在跑了,設定物件才被改壞 —— 設定是可變的、由參照持有。
+            // The client is already running when the options object is broken; it is mutable and held by reference.
+            options.Uri = null;
+            factory[0].PushFault();
+
+            await Wait.UntilAsync(() => client.State == WebSocketClientState.Closed, "非暫時性失敗後關閉");
+        }
+
+        Assert.IsTrue(logger.HasEvent(UnrecoverableEventId), "放棄一定要有日誌,這是需要告警的事件");
+        Assert.IsFalse(
+            logger.HasEvent(ReconnectExhaustedEventId),
+            "這次不是次數用盡,記成那一種會把查修方向帶偏");
+
+        var entry = logger.Entries.Single(record => record.EventId.Id == UnrecoverableEventId);
+        Assert.AreEqual(LogLevel.Error, entry.Level, "資料流停擺必須是 Error 等級");
+        StringAssert.Contains(
+            entry.Message,
+            WebSocketErrorCodes.OptionsInvalid,
+            "日誌要寫出是哪個錯誤讓它放棄的");
     }
 
     [TestMethod]

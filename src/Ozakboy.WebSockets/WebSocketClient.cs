@@ -459,8 +459,10 @@ public sealed class WebSocketClient : IWebSocketClient
     // ── Connection and reconnect loop ─────────────────────────────────
 
     /// <summary>
-    /// 背景主迴圈:維持連線,斷了就依退避策略重連,直到被關閉或次數用盡。
-    /// The background loop that keeps the connection up, reconnecting with backoff until closed or out of attempts.
+    /// 背景主迴圈:維持連線,斷了就依退避策略重連,直到被關閉、次數用盡,或遇到重試不可能修好的
+    /// 非暫時性失敗。
+    /// The background loop that keeps the connection up, reconnecting with backoff until it is closed, runs out of
+    /// attempts, or hits a non-transient failure that retrying could never fix.
     /// </summary>
     private async Task RunAsync(bool startConnected)
     {
@@ -491,6 +493,7 @@ public sealed class WebSocketClient : IWebSocketClient
                         ? WebSocketCloseReason.RemoteClosed
                         : WebSocketCloseReason.ReconnectAttemptsExhausted;
 
+                    Log.ReconnectExhausted(_logger, Volatile.Read(ref _consecutiveFailedAttempts));
                     FailTerminally(reason, WebSocketErrors.ReconnectExhausted(failedAttempts));
                     return;
                 }
@@ -520,6 +523,32 @@ public sealed class WebSocketClient : IWebSocketClient
                     failedAttempts++;
                     Volatile.Write(ref _consecutiveFailedAttempts, failedAttempts);
                     Log.ConnectFailed(_logger, failedAttempts, connectResult.Error.Code);
+
+                    // 非暫時性的失敗一次都不再試。重試不可能改變結果 —— 這正是 IsTransient 存在的意義 ——
+                    // 而 MaxReconnectAttempts 預設是無限,繼續退避重試就會變成永遠不會結束的空轉:
+                    // 不崩潰、不停止、日誌一直在動,看起來像在工作。典型來源是客戶端跑起來之後設定物件
+                    // 被改壞,每一次重連都收到同一個 ws.options_invalid。
+                    // 這裡刻意依 IsTransient 判斷而不是針對特定代碼特判,新增的非暫時性錯誤才會自動適用。
+                    // A non-transient failure is not retried even once: retrying cannot change the outcome — that is
+                    // what IsTransient is for — and with MaxReconnectAttempts defaulting to unlimited, backing off
+                    // and trying again becomes a spin that never ends: no crash, no stop, a log that keeps moving and
+                    // looks like work. The typical source is a configuration object mutated after start-up, which
+                    // yields the same ws.options_invalid on every attempt. The decision reads IsTransient rather than
+                    // singling out a code, so any non-transient error added later is covered automatically.
+                    //
+                    // 關閉中是例外:此時的失敗多半是取消(非暫時性分類),那是正常收尾而不是故障,
+                    // 要留給下方的關閉路徑處理。
+                    // Shutdown is the exception: a failure at that moment is usually a cancellation, which is a
+                    // non-transient category but a normal ending rather than a fault, and belongs to the close path
+                    // below.
+                    if (!connectResult.Error.IsTransient && !token.IsCancellationRequested && !_closeRequested)
+                    {
+                        Log.Unrecoverable(_logger, connectResult.Error.Code);
+                        FailTerminally(
+                            WebSocketCloseReason.UnrecoverableError,
+                            WebSocketErrors.Unrecoverable(connectResult.Error, failedAttempts));
+                        return;
+                    }
 
                     // 只在一連串失敗的第一次送出通知,否則長時間斷線會把佇列灌滿重複的失敗訊息。
                     // Only the first failure of a run is published; otherwise a long outage floods the queue with
@@ -1178,9 +1207,14 @@ public sealed class WebSocketClient : IWebSocketClient
         connection?.Dispose();
     }
 
+    /// <summary>
+    /// 終局結束:把終局錯誤送進串流、關閉狀態機、結束串流。呼叫端負責先記錄「為什麼」的日誌 ——
+    /// 放棄的理由不只一種,日誌訊息必須分得出來。
+    /// Ends for good: publishes the terminal error, closes the state machine, and completes the stream. The caller
+    /// logs why first, because there is more than one way to give up and the log has to tell them apart.
+    /// </summary>
     private void FailTerminally(WebSocketCloseReason reason, Error error)
     {
-        Log.ReconnectExhausted(_logger, Volatile.Read(ref _consecutiveFailedAttempts));
         PublishFailure(error);
         SetState(WebSocketClientState.Closed, reason, error);
         _queue.Writer.TryComplete();

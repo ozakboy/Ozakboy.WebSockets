@@ -57,4 +57,7 @@ internal static partial class Log
 
     [LoggerMessage(EventId = 1013, Level = LogLevel.Warning, Message = "等待對方回覆關閉 frame 超過 {Timeout},改以中止收尾。The peer did not answer the close frame in time; aborting instead.")]
     internal static partial void CloseTimedOut(ILogger logger, TimeSpan timeout);
+
+    [LoggerMessage(EventId = 1014, Level = LogLevel.Error, Message = "連線失敗且重試不可能改變結果({Reason}),不再重連,資料流已停止。A non-transient connect failure; not retrying, and the data stream has stopped.")]
+    internal static partial void Unrecoverable(ILogger logger, string reason);
 }

@@ -98,14 +98,14 @@ await foreach (var item in client.Messages(cancellationToken))
     }
 
     // 失敗代表這裡斷過線,資料可能有缺口。看 IsTransient 就知道是哪一種:
-    // true 是缺口,串流會繼續;false 是終局失敗(ws.reconnect_exhausted),這是最後一個元素。
+    // true 是缺口,串流會繼續;false 是終局失敗,客戶端已停止,這是最後一個元素。
     if (item.Error.IsTransient)
     {
         logger.LogWarning("串流有缺口:{Error}", item.Error);
         continue;
     }
 
-    item.Error.TryGetInt64("attempts", out var attempts);
+    item.Error.TryGetInt64(WebSocketErrorDataKeys.Attempts, out var attempts);
     logger.LogError("客戶端已在重連 {Attempts} 次後停止:{Error}", attempts, item.Error);
 }
 ```
@@ -152,7 +152,9 @@ var stats = client.Statistics;
 - `MessagesDropped` —— 只要不是零,就代表已經有資料沒被處理到。
 - `ReconnectCount` 對照 `SubscriptionReplayCount` —— 這兩個應該一起成長。重連在增加而重放停著不動,就是「連上了但沒重新訂閱」的樣子。
 
-`State` 與 `CloseReason` 用來區分正常關機與重連用盡:兩者的狀態都是 `Closed`,但只有其中一個需要告警。
+`State` 與 `CloseReason` 用來區分正常關機與需要告警的結束:所有結局的狀態都是 `Closed`,靠理由才分得出
+`CallerRequested`、`ReconnectAttemptsExhausted`(次數用盡)與 `UnrecoverableError`(重試修不好的失敗 ——
+該查的是自己這邊,不是對方)。
 
 ---
 
@@ -167,7 +169,8 @@ var stats = client.Statistics;
 | `ws.connect_timeout` | Timeout | 握手沒能在時限內完成 |
 | `ws.connection_lost` | Network | 連線中斷,資料有缺口 |
 | `ws.idle_timeout` | Timeout | 閒置時間內什麼都沒收到 |
-| `ws.reconnect_exhausted` | **Exhausted**(非暫時性) | 放棄重連,客戶端已停止 —— **串流的最後一個元素** |
+| `ws.reconnect_exhausted` | **Exhausted**(非暫時性) | 次數用盡後放棄,客戶端已停止 —— **串流的最後一個元素** |
+| `ws.unrecoverable` | **Exhausted**(非暫時性) | 遇到重試修不好的失敗,一次都沒重試就放棄 —— **串流的最後一個元素** |
 | `ws.not_connected` | Unavailable;客戶端已關閉時為 **Exhausted** | 目前沒有連線可送 |
 | `ws.send_failed` | Network | 送出失敗 |
 | `ws.subscription_replay_failed` | Network | 重放失敗,這條連線已作廢重來 |
@@ -181,21 +184,32 @@ var stats = client.Statistics;
 要換一個新的客戶端 —— 所以它是 `Exhausted` 而不是暫時性的 `Unavailable`。`ws.not_connected` 同一套規則:
 連線中或重連中是暫時性的,客戶端關閉之後就是 `Exhausted`。
 
-錯誤訊息裡的數值同時放在 `Error.Data`,不必去剖析字串:
+重連迴圈對自己也套用同一條規則:`IsTransient` 為 `false` 的失敗一次都不重試 —— 重試不可能改變結果 ——
+客戶端會以 `ws.unrecoverable` 與 `CloseReason.UnrecoverableError` 結束,而不是永遠退避下去。暫時性失敗
+照舊無限重連。
 
-| 代碼 | 資料鍵 |
+錯誤訊息裡的數值同時放在 `Error.Data`,不必去剖析字串。鍵是 `WebSocketErrorDataKeys` 的公開常數,請從那裡
+取用、不要硬寫字串:鍵打錯完全沒有徵兆,編譯得過、不擲例外,`TryGetXxx` 只是回傳 `false`。
+
+| 代碼 | 資料鍵(`WebSocketErrorDataKeys`) |
 | --- | --- |
-| `ws.reconnect_exhausted` | `attempts` |
-| `ws.connect_timeout`、`ws.idle_timeout` | `timeoutMs` |
-| `ws.message_too_large` | `limitBytes` |
-| `ws.subscription_not_found` | `subscriptionId` |
-| `ws.subscription_replay_failed` | `subscriptionId`、`innerCode` |
-| `ws.not_connected` | `state` |
-| `ws.invalid_state` | `state`、`operation` |
-| `ws.cancelled` | `operation` |
+| `ws.reconnect_exhausted` | `Attempts` |
+| `ws.unrecoverable` | `InnerCode`、`InnerCategory`、`Attempts` |
+| `ws.connect_timeout`、`ws.idle_timeout` | `TimeoutMs` |
+| `ws.message_too_large` | `LimitBytes` |
+| `ws.subscription_not_found` | `SubscriptionId` |
+| `ws.subscription_replay_failed` | `SubscriptionId`、`InnerCode` |
+| `ws.not_connected` | `State` |
+| `ws.invalid_state` | `State`、`Operation` |
+| `ws.cancelled` | `Operation` |
+
+`Attempts` 是次數、`TimeoutMs` 的單位是毫秒、`LimitBytes` 的單位是位元組,三者都用 `TryGetInt64` 讀;
+其餘是字串,用 `TryGetData` 讀 —— `State` 是 `WebSocketClientState` 的名稱,`InnerCode` 是
+`WebSocketErrorCodes` 的值,`InnerCategory` 是 `ErrorCategory` 的名稱。
 
 ```csharp
-error.TryGetInt64("attempts", out var attempts);
+error.TryGetInt64(WebSocketErrorDataKeys.Attempts, out var attempts);
+error.TryGetData(WebSocketErrorDataKeys.InnerCode, out var innerCode);
 ```
 
 ---
@@ -208,7 +222,7 @@ error.TryGetInt64("attempts", out var attempts);
 var client = new WebSocketClient(options, myFakeFactory, logger, myFakeClock);
 ```
 
-這個套件自己的測試就是這樣寫的 —— 100 條,沒有任何一條開過 socket。
+這個套件自己的測試就是這樣寫的 —— 105 條,沒有任何一條開過 socket。
 
 ---
 

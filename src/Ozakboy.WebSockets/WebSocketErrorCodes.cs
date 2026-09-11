@@ -15,12 +15,14 @@ namespace Ozakboy.WebSockets;
 /// <see cref="Core.Abstractions.Error.Data"/> 裡,用
 /// <see cref="Core.Abstractions.Error.TryGetInt64(string, out long)"/> 或
 /// <see cref="Core.Abstractions.Error.TryGetData(string, out string)"/> 讀回來即可,不必剖析訊息字串。
-/// 各代碼帶哪些鍵見下方各自的說明。
+/// 鍵一律用 <see cref="WebSocketErrorDataKeys"/> 的常數,不要硬寫字串字面值 —— 打錯不會有任何徵兆,
+/// 只會安靜地讀不到值。各代碼帶哪些鍵見下方各自的說明。
 /// The numbers that appear in the message — reconnect attempts, timeout lengths, size limits, subscription ids —
 /// are also in <see cref="Core.Abstractions.Error.Data"/>. Read them back with
 /// <see cref="Core.Abstractions.Error.TryGetInt64(string, out long)"/> or
-/// <see cref="Core.Abstractions.Error.TryGetData(string, out string)"/> rather than parsing the text; the keys each
-/// code carries are listed with it below.
+/// <see cref="Core.Abstractions.Error.TryGetData(string, out string)"/> rather than parsing the text. Always name a
+/// key through the <see cref="WebSocketErrorDataKeys"/> constants instead of writing the literal: a typo there shows
+/// no symptom, it just reads nothing back. The keys each code carries are listed with it below.
 /// </para>
 /// </remarks>
 public static class WebSocketErrorCodes
@@ -82,6 +84,35 @@ public static class WebSocketErrorCodes
     /// giving up.
     /// </remarks>
     public const string ReconnectExhausted = "ws.reconnect_exhausted";
+
+    /// <summary>
+    /// 連線失敗的原因是非暫時性的,客戶端一次都沒有重試就停止。分類為
+    /// <see cref="Core.Abstractions.ErrorCategory.Exhausted"/>(非暫時性),因此
+    /// <see cref="Core.Abstractions.Error.IsTransient"/> 為 <see langword="false"/>。
+    /// A connect failure that retrying cannot fix; the client stopped without retrying even once. Categorised as
+    /// <see cref="Core.Abstractions.ErrorCategory.Exhausted"/>, which is not transient, so
+    /// <see cref="Core.Abstractions.Error.IsTransient"/> is <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 與 <see cref="ReconnectExhausted"/> 的差別是「試過很多次都失敗」對「一次都不該試」。最典型的來源是
+    /// 客戶端跑起來之後設定物件被改壞(<see cref="OptionsInvalid"/>)—— 每次重連都會得到同一個錯誤,
+    /// 退避重試只是無限空轉。
+    /// The difference from <see cref="ReconnectExhausted"/> is "tried many times and failed" versus "must not try
+    /// even once". The typical source is a configuration object mutated after the client started
+    /// (<see cref="OptionsInvalid"/>): every reconnect would produce the same error and backing off would only spin
+    /// forever.
+    /// </para>
+    /// <para>
+    /// 附帶的 <see cref="Core.Abstractions.Error.Data"/> 含
+    /// <see cref="WebSocketErrorDataKeys.InnerCode"/> 與 <see cref="WebSocketErrorDataKeys.InnerCategory"/>
+    /// (害客戶端放棄的那個錯誤),以及 <see cref="WebSocketErrorDataKeys.Attempts"/>。
+    /// The accompanying <see cref="Core.Abstractions.Error.Data"/> carries
+    /// <see cref="WebSocketErrorDataKeys.InnerCode"/> and <see cref="WebSocketErrorDataKeys.InnerCategory"/> — the
+    /// failure that made the client give up — along with <see cref="WebSocketErrorDataKeys.Attempts"/>.
+    /// </para>
+    /// </remarks>
+    public const string Unrecoverable = "ws.unrecoverable";
 
     /// <summary>
     /// 目前沒有連線,無法送出。分類跟著狀態走:客戶端已關閉時為

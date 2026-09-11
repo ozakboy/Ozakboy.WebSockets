@@ -250,6 +250,119 @@ public sealed class WebSocketClientReconnectTests
         Assert.AreEqual(WebSocketCloseReason.RemoteClosed, harness.Client.CloseReason);
     }
 
+    /// <summary>
+    /// 對一個要連續跑好幾週的元件來說,最糟的失敗形態不是崩潰,是無限空轉:不會停止、日誌一直在動,
+    /// 看起來像在工作,實際上永遠不會恢復。設定物件是可變的、由參照持有,重連迴圈每次都重跑
+    /// <c>Validate()</c>,所以客戶端跑起來之後被改壞的設定會讓每一次重連都收到同一個非暫時性錯誤。
+    /// 而 <see cref="WebSocketClientOptions.MaxReconnectAttempts"/> 預設無限,正是 24 小時執行的建議設定,
+    /// 也就是說預設設定就會踩到。
+    /// The worst failure for something meant to run for weeks is not a crash but an endless spin: it never stops, the
+    /// log keeps moving, it looks like work, and it never recovers. The options object is mutable and held by
+    /// reference, and the reconnect loop re-runs <c>Validate()</c> on every attempt, so a configuration broken after
+    /// start-up yields the same non-transient error forever — and with
+    /// <see cref="WebSocketClientOptions.MaxReconnectAttempts"/> defaulting to unlimited, which is the recommended
+    /// setting for a round-the-clock process, the default configuration is the one that walks into it.
+    /// </summary>
+    [TestMethod]
+    public async Task 執行期設定被改壞_終局結束而不是無限空轉()
+    {
+        // 刻意不動 MaxReconnectAttempts:用的就是會踩到這個 bug 的預設值。
+        // MaxReconnectAttempts is deliberately left alone: this is the default that walks into the bug.
+        await using var harness = new ClientHarness();
+        harness.StartConsuming();
+        await harness.Client.ConnectAsync();
+
+        Assert.IsNull(harness.Options.MaxReconnectAttempts, "這條測試的前提是預設的無限重連");
+
+        // 客戶端已經在跑了,才把設定改壞。
+        // The client is already running when the configuration is broken.
+        harness.Options.Uri = null;
+
+        harness.Factory[0].PushFault();
+
+        // 不推進假時鐘:如果客戶端真的去退避重試了,這裡就會因為永遠等不到 Closed 而逾時失敗,
+        // 那正是「無限空轉」在測試裡的樣子。
+        // The fake clock is never advanced: if the client did back off and retry, this would time out waiting for
+        // Closed, which is exactly what the endless spin looks like from a test.
+        await harness.WaitForStateAsync(WebSocketClientState.Closed);
+
+        Assert.AreEqual(WebSocketCloseReason.UnrecoverableError, harness.Client.CloseReason);
+        Assert.AreEqual(
+            1,
+            harness.Factory.CreateCount,
+            "非暫時性失敗一次都不該重試,所以不會有第二條連線");
+
+        await Wait.UntilAsync(
+            () => harness.FailuresReceived.Any(error => error.Code == WebSocketErrorCodes.Unrecoverable),
+            "串流中出現不可恢復的終局失敗");
+
+        var terminal = harness.FailuresReceived.Single(error => error.Code == WebSocketErrorCodes.Unrecoverable);
+
+        Assert.AreEqual(ErrorCategory.Exhausted, terminal.Category);
+        Assert.IsFalse(
+            terminal.IsTransient,
+            "終局失敗一定要是非暫時性,否則呼叫端會照著 IsTransient 對一個已經死掉的客戶端永遠重試");
+
+        // 事後只知道「客戶端放棄了」沒有用,必須看得出是被什麼打敗的。
+        // Knowing only that the client gave up is useless; the error has to say what defeated it.
+        Assert.IsTrue(
+            terminal.TryGetData(WebSocketErrorDataKeys.InnerCode, out var innerCode),
+            "終局錯誤要帶上害它放棄的錯誤代碼");
+        Assert.AreEqual(WebSocketErrorCodes.OptionsInvalid, innerCode);
+        Assert.IsTrue(terminal.TryGetData(WebSocketErrorDataKeys.InnerCategory, out var innerCategory));
+        Assert.AreEqual(nameof(ErrorCategory.Validation), innerCategory);
+        Assert.IsTrue(terminal.TryGetInt64(WebSocketErrorDataKeys.Attempts, out var attempts));
+        Assert.AreEqual(1L, attempts, "失敗當下就放棄,只有那一次嘗試");
+
+        // 狀態變更事件也要帶著同一個理由,否則只訂事件的監控看不出這次是哪一種結局。
+        // The state-change event carries the same reason, or monitoring that only subscribes to the event cannot
+        // tell which ending this was.
+        var closedChange = harness.StateChanges.Single(change => change.CurrentState == WebSocketClientState.Closed);
+        Assert.AreEqual(WebSocketCloseReason.UnrecoverableError, closedChange.CloseReason);
+        Assert.AreEqual(WebSocketErrorCodes.Unrecoverable, closedChange.Error?.Code);
+
+        // 終局之後串流必須結束,否則呼叫端會永遠停在 await foreach 上 —— 那又是另一種安靜的空轉。
+        // The stream must end afterwards, or the caller waits on await foreach forever, which is another silent
+        // spin.
+        await Wait.UntilAsync(() => harness.ConsumerCompleted, "訊息串流已結束");
+    }
+
+    /// <summary>
+    /// 上面那條修正不可以讓正常的重連變保守。網路斷、逾時、對方不可用全都是暫時性失敗,
+    /// 連續失敗再多次也要一路重試下去 —— 那是本套件存在的理由。
+    /// The fix above must not make ordinary reconnects conservative. Dropped networks, timeouts and an unavailable
+    /// peer are all transient, and however many times they repeat the client keeps retrying; that is the whole point
+    /// of this package.
+    /// </summary>
+    [TestMethod]
+    public async Task 暫時性失敗_連續失敗多次仍然一路重連不會被判終局()
+    {
+        await using var harness = new ClientHarness(options => options.MaxReconnectAttempts = null);
+        harness.StartConsuming();
+        harness.Factory.Configure = (connection, ordinal) =>
+        {
+            if (ordinal is >= 2 and <= 9)
+            {
+                connection.ConnectException = new WebSocketException(WebSocketError.Faulted, "對方維護中");
+            }
+        };
+
+        await harness.Client.ConnectAsync();
+        harness.Factory[0].PushFault();
+
+        await harness.AdvanceUntilAsync(() => harness.Factory.CreateCount >= 10, "第十次連線嘗試");
+        await harness.WaitForStateAsync(WebSocketClientState.Connected);
+
+        Assert.AreNotEqual(WebSocketClientState.Closed, harness.Client.State);
+        Assert.AreEqual(WebSocketCloseReason.None, harness.Client.CloseReason, "沒有任何結局發生過");
+        Assert.IsFalse(
+            harness.FailuresReceived.Any(error => error.Code == WebSocketErrorCodes.Unrecoverable),
+            "暫時性失敗不可以被當成不可恢復");
+        Assert.IsTrue(
+            harness.FailuresReceived.All(error => error.IsTransient),
+            "串流中出現的每一個失敗都應該是暫時性的缺口通知");
+    }
+
     [TestMethod]
     public async Task 無限重連_失敗多次也不會放棄()
     {
